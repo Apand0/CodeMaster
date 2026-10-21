@@ -1,0 +1,76 @@
+{
+    "gemini_3.8": {
+        "model_id": "gemini-3.8-flash",
+        "env_key": "GEMINI_API_KEY"
+        },
+    
+    "gemini_3.6": {
+        "model_id": "gemini-3.6-flash",
+        "env_key": "GEMINI_API_KEY"
+        },
+    
+    "groq_120b": {
+        "model_id": "openai/gpt-oss-120b",
+        "env_key": "GROQ_API_KEY"
+        },
+    
+    "groq_20b": {
+        "model_id": "openai/gpt-oss-20b",
+        "env_key": "GROQ_API_KEY"
+        },
+    
+    "groq_qwen3.8": {
+        "model_id": "qwen/qwen3.8-27b",
+        "env_key": "GROQ_API_KEY"
+    },
+
+    "cloudfare_glm-5.3": {
+        "model_id": "@cf/zai-org/glm-5.3",
+        "env_key": "CLOUD_API_KEY"
+    },
+
+    "cloudfare_glm-5.3flash": {
+        "model_id": "@cf/zai-org/glm-5.3-flash",
+        "env_key": "CLOUD_API_KEY"
+    },
+
+    "cloudfare_qwen3.8": {
+        "model_id": "@cf/qwen/qwen3.8-27b",
+        "env_key": "CLOUD_API_KEY"
+    },
+
+    "cloudfare_deepseek_4pro": {
+        "model_id": "@cf/deepseek-ai/deepseek-v4-pro-0813",
+        "env_key": "CLOUD_API_KEY"
+    },
+
+    "cloudfare_deepseek_4flash": {
+        "model_id": "@cf/deepseek-ai/deepseek-v4-flash-0731",
+        "env_key": "CLOUD_API_KEY"
+    },
+
+    "cloudfare_kimi_2.7": {
+        "model_id": "@cf/moonshotai/kimi-k2.7-code",
+        "env_key": "CLOUD_API_KEY"
+    },
+
+    "cloudfare_kimi_2.6": {
+        "model_id": "@cf/moonshotai/kimi-k2.6",
+        "env_key": "CLOUD_API_KEY"
+    },
+
+    "cloudfare_gemma_4": {
+        "model_id": "@cf/google/gemma-4-26b-a4b-it",
+        "env_key": "CLOUD_API_KEY"
+    },
+
+    "kilo_free": {
+        "model_id": "kilo-auto/free",
+        "api_base": "https://api.kilo.ai/api/gateway"
+    },
+
+    "nvidia": {
+        "model_id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "api_base": "https://api.kilo.ai/api/gateway"
+    }
+}
