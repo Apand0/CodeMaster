@@ -186,19 +186,20 @@ class Config:
     # smolagents rimanda a OGNI step tutta la cronologia (prompt + tool + output precedenti):
     # il costo cresce circa col quadrato dei passi, quindi step e output dei tool vanno tenuti corti.
     max_steps: int = 10
-    max_tool_output_chars: int = 3500
-    read_default_lines: int = 120          # righe restituite da read_file se non specificate
-    repo_map_chars: int = 3000
+    max_tool_output_chars: int = 1400      # tetto output singolo tool (1200-1500 per evitare picchi)
+    read_default_lines: int = 45           # righe restituite da read_file di default (40-50 righe)
+    repo_map_chars: int = 1000             # mappa strutturale compatta nel system prompt
     history_turns: int = 4
-    history_answer_chars: int = 1200       # testa+coda di ogni risposta passata rimandata al modello
+    history_answer_chars: int = 800        # testa+coda di ogni risposta passata rimandata al modello
     max_output_tokens: int = 4096          # tetto in uscita per chiamata (le risposte lunghe ne servono ~2-3k)
     llm_max_retries: int = 4
     llm_retry_base_delay: float = 6.0
     fallback_providers: tuple[str, ...] = ()   # alias di providers.json da provare se il principale va in 429
     llm_switch_after: int = 2              # fallimenti 429 sul provider corrente prima di passare al successivo
     llm_cooldown_s: float = 90.0           # quanto tempo evitare un provider appena andato in rate limit
-    obs_budget_chars: int = 10_000         # oltre questo totale gli output dei tool più vecchi vengono ridotti alle intestazioni (0 = mai)
+    obs_budget_chars: int = 2500           # tetto budget osservazioni in memoria per rolling pruning
     use_answer_cache: bool = True          # riusa le risposte finché i file citati non cambiano
+    fast_path_enabled: bool = True         # risoluzione RAG rapida a singolo step per query informative
 
     # --- Strumenti opzionali (spenti di default, attivabili da CLI) ---
     allow_exec: bool = False               # abilita run_command (su copia temporanea)

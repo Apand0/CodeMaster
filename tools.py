@@ -94,11 +94,11 @@ class _Base(Tool):
 
 class ListDirTool(_Base):
     name = "list_dir"
-    description = "Elenca file e sottocartelle di una directory della repository."
+    description = "Elenca file e cartelle della repo."
     inputs = {
         "path": {
             "type": "string",
-            "description": "Cartella relativa alla radice della repo ('.' per la radice).",
+            "description": "Cartella (default '.').",
             "nullable": True,
         }
     }
@@ -127,11 +127,7 @@ class ListDirTool(_Base):
 
 class FileOutlineTool(_Base):
     name = "get_file_outline"
-    description = (
-        "Mostra la radiografia completa di un file: tutti gli import, classi, funzioni/metodi "
-        "con le loro firme, quali funzioni chiamano e i numeri di riga esatti. "
-        "Usalo SEMPRE prima di read_file per orientarti in file lunghi o privi di documentazione."
-    )
+    description = "Radiografia AST del file: import, classi, metodi, firme e righe."
     inputs = {"path": {"type": "string", "description": "Percorso relativo del file."}}
     output_type = "string"
 
@@ -141,15 +137,11 @@ class FileOutlineTool(_Base):
 
 class ReadFileTool(_Base):
     name = "read_file"
-    description = (
-        "Legge un intervallo di righe di un file con numeri di riga (default ~120 righe, max 250). "
-        "L'output ha un tetto in caratteri: se si ferma prima, indica da quale riga riprendere. "
-        "Usa get_file_outline prima per sapere quali righe leggere."
-    )
+    description = "Legge un intervallo di righe con numeri (default ~45 righe, max 150)."
     inputs = {
         "path": {"type": "string", "description": "Percorso relativo del file."},
-        "start_line": {"type": "integer", "description": "Prima riga (1-based). Default 1.", "nullable": True},
-        "end_line": {"type": "integer", "description": "Ultima riga inclusa. Default: ~120 righe da start_line.", "nullable": True},
+        "start_line": {"type": "integer", "description": "Prima riga (1-based, default 1).", "nullable": True},
+        "end_line": {"type": "integer", "description": "Ultima riga inclusa.", "nullable": True},
     }
     output_type = "string"
 
@@ -162,11 +154,11 @@ class ReadFileTool(_Base):
         s = max(1, int(start_line or 1))
         wanted = max(1, int(self.ctx.cfg.read_default_lines))
         e = int(end_line) if end_line else s + wanted - 1
-        e = min(e, s + 249, len(lines))
+        e = min(e, s + 149, len(lines))
         if s > len(lines):
             return f"Il file ha solo {len(lines)} righe."
         # si taglia a FINE RIGA entro il budget di caratteri, così nessuna riga resta spezzata a metà
-        budget = max(500, self.ctx.cfg.max_tool_output_chars - 160)
+        budget = max(400, self.ctx.cfg.max_tool_output_chars - 120)
         rows: list[str] = []
         used = 0
         for i in range(s, e + 1):
@@ -182,11 +174,8 @@ class ReadFileTool(_Base):
 
 class LocateSnippetTool(_Base):
     name = "locate_code_snippet"
-    description = (
-        "Trova il file esatto, i numeri di riga e il simbolo AST contenitore per qualsiasi "
-        "blocco o riga di codice incollata dall'utente."
-    )
-    inputs = {"snippet": {"type": "string", "description": "Frammento di codice incollato dall'utente."}}
+    description = "Trova file, righe e simbolo per uno snippet di codice."
+    inputs = {"snippet": {"type": "string", "description": "Frammento di codice."}}
     output_type = "string"
 
     def forward(self, snippet: str) -> str:
@@ -226,22 +215,20 @@ class LocateSnippetTool(_Base):
         res = self.ctx.index.search(snippet, k=4)
         if not res:
             return "Impossibile trovare lo snippet nella repository."
+        chunk_budget = min(600, max(300, self.ctx.cfg.max_tool_output_chars - 200))
         return self.ctx.clip(
             "Match esatto non trovato; ecco i blocchi più simili:\n\n"
-            + "\n\n".join(_fmt_chunk(c, True, 1200) for c, _ in res)
+            + "\n\n".join(_fmt_chunk(c, True, chunk_budget) for c, _ in res)
         )
 
 
 class SearchCodeTool(_Base):
     name = "search_code"
-    description = (
-        "Ricerca ibrida (semantica + BM25) nel codice e nella documentazione. "
-        "Supporta path_prefix per filtrare la ricerca dentro una cartella o un singolo file."
-    )
+    description = "Ricerca ibrida (semantica + BM25) nel codice."
     inputs = {
-        "query": {"type": "string", "description": "Domanda concettuale o termini tecnici."},
-        "top_k": {"type": "integer", "description": "Numero di risultati (default 6, max 12).", "nullable": True},
-        "path_prefix": {"type": "string", "description": "Limita la ricerca a una cartella o file.", "nullable": True},
+        "query": {"type": "string", "description": "Termini o domanda concettuale."},
+        "top_k": {"type": "integer", "description": "Numero risultati (default 6).", "nullable": True},
+        "path_prefix": {"type": "string", "description": "Filtra per percorso.", "nullable": True},
     }
     output_type = "string"
 
@@ -250,17 +237,17 @@ class SearchCodeTool(_Base):
         res = self.ctx.index.search(query, k=k, path_prefix=path_prefix or None)
         if not res:
             return "Nessun risultato."
-        per = max(400, self.ctx.cfg.max_tool_output_chars // k - 150)
+        per = max(250, min(500, self.ctx.cfg.max_tool_output_chars // k))
         return self.ctx.clip("\n\n".join(_fmt_chunk(c, True, per) for c, _ in res))
 
 
 class GrepTool(_Base):
     name = "grep"
-    description = "Cerca un'espressione regolare o stringa (case-insensitive) nei file della repository."
+    description = "Cerca regex o testo (case-insensitive) nei file."
     inputs = {
-        "pattern": {"type": "string", "description": "Regex o testo esatto da cercare."},
-        "path": {"type": "string", "description": "Cartella o file in cui cercare (default: tutta la repo).", "nullable": True},
-        "max_results": {"type": "integer", "description": "Massimo risultati (default 40).", "nullable": True},
+        "pattern": {"type": "string", "description": "Regex o testo esatto."},
+        "path": {"type": "string", "description": "Cartella o file (default '.').", "nullable": True},
+        "max_results": {"type": "integer", "description": "Max risultati (default 40).", "nullable": True},
     }
     output_type = "string"
 
@@ -289,8 +276,8 @@ class GrepTool(_Base):
 
 class FindDefinitionTool(_Base):
     name = "find_definition"
-    description = "Trova dove è definita una funzione, classe o metodo (es. 'forward' o 'GPT.generate') e mostra il codice."
-    inputs = {"symbol": {"type": "string", "description": "Nome del simbolo o 'Classe.metodo'."}}
+    description = "Mostra definizione e codice di una funzione, classe o metodo."
+    inputs = {"symbol": {"type": "string", "description": "Nome simbolo o 'Classe.metodo'."}}
     output_type = "string"
 
     def forward(self, symbol: str) -> str:
@@ -298,7 +285,8 @@ class FindDefinitionTool(_Base):
         if not found:
             return f"Nessuna definizione trovata per '{symbol}'. Prova search_code o grep."
         shown = found[:4]
-        txt = "\n\n".join(_fmt_chunk(c, True, 2500) for c in shown)
+        max_body = min(600, max(250, self.ctx.cfg.max_tool_output_chars - 200))
+        txt = "\n\n".join(_fmt_chunk(c, True, max_body) for c in shown)
         if len(found) > len(shown):
             txt += "\n\nAltre parti/definizioni: " + ", ".join(
                 f"{c.path}:{c.start}-{c.end} {c.qualname}" for c in found[4:12]
@@ -308,13 +296,10 @@ class FindDefinitionTool(_Base):
 
 class FindReferencesTool(_Base):
     name = "find_references"
-    description = (
-        "Elenca le righe della repository in cui un simbolo viene utilizzato (match su parola intera), "
-        "indicando per ognuna la funzione/classe che la contiene."
-    )
+    description = "Elenca le righe in cui un simbolo viene utilizzato."
     inputs = {
         "symbol": {"type": "string", "description": "Nome esatto del simbolo."},
-        "max_results": {"type": "integer", "description": "Massimo risultati (default 35).", "nullable": True},
+        "max_results": {"type": "integer", "description": "Max risultati (default 35).", "nullable": True},
     }
     output_type = "string"
 

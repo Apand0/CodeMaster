@@ -36,6 +36,7 @@ def main() -> None:
     ap.add_argument("--allow-exec", action="store_true", help="Abilita run_command: esegue comandi Python su una COPIA temporanea della repo")
     ap.add_argument("--allow-web", action="store_true", help="Abilita web_lookup: ricerca web e lettura di pagine (il contenuto è trattato come dato)")
     ap.add_argument("--no-cache", action="store_true", help="Disabilita la cache delle risposte (utile per misurare)")
+    ap.add_argument("--no-fast-path", action="store_true", help="Disabilita il fast-path RAG a step singolo")
     ap.add_argument("--obs-budget", type=int, default=None, help="Caratteri di output dei tool tenuti in memoria prima di ridurre i più vecchi (0 = mai)")
     ap.add_argument("--share", action="store_true", help="Genera un link pubblico temporaneo Gradio")
     ap.add_argument("--port", type=int, default=7860, help="Porta locale per il server Gradio")
@@ -48,6 +49,7 @@ def main() -> None:
     cfg = Config(
         embedder_type=args.embedder, allow_exec=args.allow_exec, allow_web=args.allow_web,
         use_answer_cache=not args.no_cache,
+        fast_path_enabled=not args.no_fast_path,
     )
     if args.obs_budget is not None:
         cfg.obs_budget_chars = args.obs_budget
