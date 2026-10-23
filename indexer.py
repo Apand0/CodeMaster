@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 
 from chunker import Chunk, chunk_file
-from config import Config, get_secret, logger
+from config import Config, call_with_backoff, get_secret, logger
 from ingest import file_kind, file_sha256, language_of, list_repo_files, read_text
 
 SYMBOL_KINDS = {"function", "method", "class", "struct", "interface", "enum", "impl", "trait"}
@@ -72,7 +72,12 @@ class GeminiAPIEmbedder:
         if not model_name.startswith("gemini/"):
             model_name = "gemini/" + model_name.replace("models/", "")
         extra = {"dimensions": self.dims} if self.dims else {}
-        resp = self._litellm.embedding(model=model_name, input=texts, api_key=self.api_key, **extra)
+        resp = call_with_backoff(
+            self._litellm.embedding,
+            model=model_name, input=texts, api_key=self.api_key, **extra,
+            max_retries=self.cfg.llm_max_retries, base_delay=self.cfg.llm_retry_base_delay,
+            label="embedding Gemini",
+        )
         vecs = np.array([item["embedding"] for item in resp.data], dtype=np.float32)
         norms = np.linalg.norm(vecs, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
