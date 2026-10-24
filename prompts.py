@@ -95,7 +95,7 @@ BASE_TOOLS = (
 
 
 LEAN_SYSTEM_PROMPT_TEMPLATE = """You are an expert assistant solving code tasks using tool calls.
-To return the final answer, call tool final_answer.
+Always reply with a tool call; return your final response using the final_answer tool.
 Available tools:
 {%- for tool in tools.values() %}
 - {{ tool.to_tool_calling_prompt() }}

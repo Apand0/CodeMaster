@@ -186,18 +186,18 @@ class Config:
     # smolagents rimanda a OGNI step tutta la cronologia (prompt + tool + output precedenti):
     # il costo cresce circa col quadrato dei passi, quindi step e output dei tool vanno tenuti corti.
     max_steps: int = 10
-    max_tool_output_chars: int = 1400      # tetto output singolo tool (1200-1500 per evitare picchi)
+    max_tool_output_chars: int = 1800      # tetto output singolo tool (1800 car. permette 45 righe di codice piene)
     read_default_lines: int = 45           # righe restituite da read_file di default (40-50 righe)
     repo_map_chars: int = 1000             # mappa strutturale compatta nel system prompt
-    history_turns: int = 4
-    history_answer_chars: int = 800        # testa+coda di ogni risposta passata rimandata al modello
+    history_turns: int = 2                 # turni di conversazione passata mantenuti (compatto per non gonfiare TaskStep)
+    history_answer_chars: int = 600        # testa+coda di ogni risposta passata rimandata al modello
     max_output_tokens: int = 4096          # tetto in uscita per chiamata (le risposte lunghe ne servono ~2-3k)
     llm_max_retries: int = 4
     llm_retry_base_delay: float = 6.0
     fallback_providers: tuple[str, ...] = ()   # alias di providers.json da provare se il principale va in 429
     llm_switch_after: int = 2              # fallimenti 429 sul provider corrente prima di passare al successivo
     llm_cooldown_s: float = 90.0           # quanto tempo evitare un provider appena andato in rate limit
-    obs_budget_chars: int = 2500           # tetto budget osservazioni in memoria per rolling pruning
+    obs_budget_chars: int = 4000           # tetto budget osservazioni in memoria per rolling pruning selettivo
     use_answer_cache: bool = True          # riusa le risposte finché i file citati non cambiano
     fast_path_enabled: bool = True         # risoluzione RAG rapida a singolo step per query informative
 

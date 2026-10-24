@@ -322,68 +322,81 @@ def compact_summary(tool: str, obs: str, max_chars: int = 220) -> str:
     return prefix + summary_text
 
 
+# Strumenti di navigazione (intermedi: output ridotti subito a riepilogo per non consumare token)
+_NAV_TOOLS = frozenset({
+    "search_code", "grep", "list_dir", "get_file_outline", "find_references",
+    "git_log", "git_diff", "check_python", "get_module_graph", "list_dependencies",
+    "get_repo_overview", "parse_traceback",
+})
+# Strumenti di prova (codice sorgente: lasciati integri finché la memoria totale rientra nel budget)
+_EVIDENCE_TOOLS = frozenset({
+    "read_file", "find_definition", "locate_code_snippet", "read_library_source",
+})
+
+
 def shrink_old_observations(
-    steps: list[Any], budget: int = 2500, current_step: ActionStep | None = None
+    steps: list[Any], budget: int = 4000, current_step: ActionStep | None = None
 ) -> int:
-    """Applica il pruning rolling immediato della cronologia interna:
-    solo l'ultimo step (k) mantiene l'osservazione integrale grezza;
-    tutti gli step precedenti (k-1, k-2, ...) vengono ridotti a un riepilogo compatto.
-    Garantisce inoltre che il totale delle osservazioni in memoria non superi `budget` caratteri.
+    """Applica il pruning rolling selettivo della cronologia interna:
+    1. I tool di navigazione (search_code, grep, list_dir...) nei passi precedenti (k-1, k-2...)
+       vengono ridotti immediatamente a un riepilogo compatto.
+    2. I tool di prova (read_file, find_definition...) restano integri nei passi storici
+       finché la memoria totale non supera `budget` (ridotti solo dal più vecchio se necessario).
+    3. L'osservazione dell'ultimo step corrente (k) non viene mai alterata (il modello deve ancora leggerla).
     Ritorna i caratteri liberati."""
     acts: list[ActionStep] = [s for s in steps if isinstance(s, ActionStep) and s.observations]
     if current_step is not None and isinstance(current_step, ActionStep) and current_step.observations:
         if current_step not in acts:
             acts.append(current_step)
 
-    if not acts:
+    if len(acts) <= 1:
         return 0
 
     freed = 0
-    # 1. Pruning rolling immediato: riduci tutti gli step precedenti (k-1, k-2, ...)
+    # 1. Pruning rolling immediato dei soli tool di navigazione negli step precedenti (acts[:-1])
     for s in acts[:-1]:
         obs = s.observations
         if obs.startswith(_SHRUNK):
             continue
         calls = s.tool_calls or []
         tname = calls[0].name if calls else "tool"
-        shrunk = compact_summary(tname, obs)
-        if len(shrunk) < len(obs):
-            diff = len(obs) - len(shrunk)
-            freed += diff
-            s.observations = shrunk
-        elif not obs.startswith(_SHRUNK) and len(obs) > 120:
-            diff = len(obs) - len(shrunk)
-            freed += max(0, diff)
-            s.observations = shrunk
+        if tname in _NAV_TOOLS:
+            shrunk = compact_summary(tname, obs)
+            if len(shrunk) < len(obs):
+                diff = len(obs) - len(shrunk)
+                freed += diff
+                s.observations = shrunk
 
-    # 2. Controllo e garanzia del tetto di budget complessivo
+    # 2. Controllo del budget totale: se supera budget, riduci i tool di prova dal più vecchio
     if budget > 0:
         total = sum(len(s.observations) for s in acts)
         if total > budget:
-            # Se la somma sfora il budget, riduci ulteriormente i passi più vecchi (k-1, k-2, ...)
             for s in acts[:-1]:
                 if total <= budget:
                     break
-                if len(s.observations) > 70:
-                    ultra = s.observations[:67] + "..."
-                    diff = len(s.observations) - len(ultra)
+                obs = s.observations
+                if obs.startswith(_SHRUNK):
+                    continue
+                calls = s.tool_calls or []
+                tname = calls[0].name if calls else "tool"
+                shrunk = compact_summary(tname, obs)
+                if len(shrunk) < len(obs):
+                    diff = len(obs) - len(shrunk)
                     freed += diff
                     total -= diff
-                    s.observations = ultra
+                    s.observations = shrunk
 
-            # Se dopo la compressione dei passi vecchi il totale supera ancora il budget,
-            # vincola l'osservazione dell'ultimo passo entro lo spazio rimanente
+            # Se ancora sopra budget, applica ultra-compressione sui passi storici già riassunti (mai sull'ultimo)
             if total > budget:
-                last = acts[-1]
-                calls = last.tool_calls or []
-                tname = calls[0].name if calls else "tool"
-                prev_sum = sum(len(s.observations) for s in acts[:-1])
-                allowed_for_last = max(300, budget - prev_sum)
-                if len(last.observations) > allowed_for_last:
-                    shrunk_last = compact_summary(tname, last.observations, max_chars=allowed_for_last)
-                    diff = len(last.observations) - len(shrunk_last)
-                    freed += diff
-                    last.observations = shrunk_last
+                for s in acts[:-1]:
+                    if total <= budget:
+                        break
+                    if len(s.observations) > 70:
+                        ultra = s.observations[:67] + "..."
+                        diff = len(s.observations) - len(ultra)
+                        freed += diff
+                        total -= diff
+                        s.observations = ultra
 
     return freed
 
@@ -415,6 +428,15 @@ def _has_ml(index: RepoIndex) -> bool:
     return any(_ML_RE.search(" ".join(cs[0].imports)) for cs in index.by_file.values() if cs)
 
 
+_TOOL_HINTS: list[tuple[re.Pattern[str], tuple[str, ...]]] = [
+    (re.compile(r"\b(commit|diff|git|cronologia|storia)\b", re.I), ("git_log", "git_diff")),
+    (re.compile(r"\b(traceback|stack ?trace|eccezion\w*)\b", re.I), ("parse_traceback",)),
+    (re.compile(r"\b(import\w*|dipendenz\w*|moduli|requirements|pacchetti)\b", re.I), ("get_module_graph", "list_dependencies")),
+    (re.compile(r"\b(punto di ingresso|entry point|panoramica|a cosa serve|onboarding)\b", re.I), ("get_repo_overview",)),
+    (re.compile(r"\b(chiamat\w*|call[ _]graph|chi chiama)\b", re.I), ("get_call_graph",)),
+]
+
+
 class RepoAgent:
     def __init__(self, index: RepoIndex, model: Any, cfg: Config | None = None) -> None:
         self.index = index
@@ -444,15 +466,20 @@ class RepoAgent:
             prompt_templates=templates,
         )
 
-    def _tools_for(self, mode: str) -> list[Any]:
+    def _tools_for(self, mode: str, question: str | None = None) -> list[Any]:
         """Solo gli strumenti utili alla modalità (descrizione e schema di ogni tool costano token a OGNI step).
-        Gli strumenti opzionali (web_lookup, run_command) sono inclusi solo se esplicitamente abilitati (R3)."""
+        Gli strumenti opzionali (web_lookup, run_command) sono inclusi solo se esplicitamente abilitati (R3).
+        Include inoltre tool addizionali mirati se la domanda corrisponde a specifici _TOOL_HINTS."""
         optional: set[str] = set()
         if self.cfg.allow_web:
             optional.add("web_lookup")
         if self.cfg.allow_exec:
             optional.add("run_command")
-        wanted = tool_names(mode) | optional
+        wanted = set(tool_names(mode)) | optional
+        if question:
+            for rx, thints in _TOOL_HINTS:
+                if rx.search(question):
+                    wanted.update(thints)
         return [t for name, t in self._all_tools.items() if name in wanted]
 
     def _instructions(self, mode: str) -> str:
@@ -557,28 +584,39 @@ class RepoAgent:
         r"race condition|leak|vulnerabil\w*|difett\w*|off-by-one|debug\w*|"
         r"refactor\w*|miglior\w*|ottimizz\w*|architettur\w*|riscriv\w*|modific\w*|"
         r"patch\w*|diff|commit|git_diff|perch[eé] (?:fallisce|non va)|"
-        r"esegui|run_command|terminale)\b",
+        r"esegui|run_command|terminale|"
+        r"chi chiama|dove [eè] usat\w*|chiamant\w*|call[ _]graph|impatto|dipendenz\w*|"
+        r"references|riferiment\w*|storia|cronologia)\b",
         re.IGNORECASE,
     )
 
+    _AMBIGUOUS_NAMES = frozenset({
+        "main", "run", "load", "forward", "step", "get", "set", "init", "update", "reset",
+        "save", "parse", "process", "call", "start", "stop", "test",
+    })
+
     def _find_symbol_chunks(self, question: str) -> tuple[list[Chunk], str]:
-        """Recupera chunk di definizione esatta per simboli citati nella domanda (0 token API)."""
+        """Recupera chunk di definizione esatta per simboli citati nella domanda (0 token API).
+        Se il simbolo è comune o ha > 3 definizioni ambigue, delega al ReAct loop."""
         for match in re.findall(r"`([A-Za-z_][A-Za-z0-9_.]*)`", question):
+            short = match.split(".")[-1].lower()
+            if short in self._AMBIGUOUS_NAMES:
+                continue
             found = self.index.find_symbol(match)
-            if found:
+            if found and len(found) <= 3:
                 return found[:3], f"Simbolo AST: {match}"
         for dotted in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]+)+\b", question):
             found = self.index.find_symbol(dotted)
-            if found:
+            if found and len(found) <= 3:
                 return found[:3], f"Simbolo AST: {dotted}"
         words = re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{2,}\b", question)
         stop = {"file", "funzione", "classe", "metodo", "codice", "repo", "cosa", "come", "dove", "quali", "quale"}
         for w in words:
-            if w.lower() in stop:
+            if w.lower() in stop or w.lower() in self._AMBIGUOUS_NAMES:
                 continue
             if w in self.index.symbols:
                 found = self.index.find_symbol(w)
-                if found:
+                if found and len(found) <= 3:
                     return found[:3], f"Simbolo AST: {w}"
         return [], ""
 
@@ -600,7 +638,8 @@ class RepoAgent:
         return [], ""
 
     def _find_hybrid_chunks(self, question: str) -> tuple[list[Chunk], str]:
-        """Ricerca ibrida (BM25 + embeddings locali) ad alta confidenza."""
+        """Ricerca ibrida (BM25 + embeddings locali) ad alta confidenza.
+        Richiede best_score >= 0.028 per garantire accordo dual-retriever (BM25 + semantico)."""
         results = self.index.search(question, k=4)
         if not results or not isinstance(results, list):
             return [], ""
@@ -608,17 +647,31 @@ class RepoAgent:
             best_score = float(results[0][1])
         except (TypeError, ValueError, IndexError):
             return [], ""
-        if best_score < 0.015:
+        if best_score < 0.028:
             return [], ""
         selected: list[Chunk] = []
         for item in results[:3]:
             try:
                 c, sc = item
-                if float(sc) >= 0.012:
+                if float(sc) >= 0.018:
                     selected.append(c)
             except (TypeError, ValueError, IndexError):
                 continue
         return selected, ""
+
+    def _numbered_chunk(self, c: Chunk, max_lines: int = 40) -> str:
+        """Restituisce il codice del chunk numerato sulle righe REALI del file sorgente."""
+        try:
+            raw = self._ctx.file_text(c.path)
+            lines = raw.splitlines()
+        except Exception:
+            lines = c.text.splitlines()
+        start = max(1, c.start)
+        end = min(c.end, start + max_lines - 1, len(lines))
+        body = "\n".join(f"{i:>5}| {lines[i-1]}" for i in range(start, end + 1))
+        if end < c.end:
+            body += f"\n      [... righe {end+1}-{c.end} non mostrate]"
+        return body
 
     def _try_fast_path(
         self, question: str, history: list[tuple[str, str]] | None = None
@@ -665,6 +718,9 @@ class RepoAgent:
             "- 'In parole semplici': 1-3 frasi chiare ed essenziali.\n"
             "- 'Nel codice': spiegazione tecnica dettagliata con citazioni esatte `file:righe` a fine frase.\n"
             "- 'Limiti': dichiara cosa non è visibile nel contesto fornito.\n"
+            "4. USCITA DI SICUREZZA: se il contesto fornito non è sufficiente per una risposta completa "
+            "o la domanda richiede analisi multi-file/chiamanti/modifiche non presenti nel testo, "
+            "rispondi ESATTAMENTE E SOLO: NEED_TOOLS\n"
         )
 
         blocks: list[str] = []
@@ -676,12 +732,17 @@ class RepoAgent:
                 h += f"\n  firma: {c.signature}"
             if c.docstring:
                 h += f"\n  doc: {c.docstring.splitlines()[0][:200]}"
-            chunk_lines = c.text[:1200].splitlines()
-            numbered = "\n".join(f"{c.start + idx:>5}| {ln}" for idx, ln in enumerate(chunk_lines))
+            numbered = self._numbered_chunk(c, max_lines=40)
             blocks.append(f"{h}\n{numbered}")
 
+        history_prefix = ""
+        if history:
+            turns = history[-2:]
+            past = "\n".join(f"Utente: {q}\nAssistente: {self._shorten(a)}" for q, a in turns)
+            history_prefix = f"Conversazione precedente (contesto):\n{past}\n\n"
+
         user_content = (
-            f"Domanda dell'utente:\n{question}\n\n"
+            f"{history_prefix}Domanda dell'utente:\n{question}\n\n"
             f"Contesto di codice dalla repository:\n" + "\n\n---\n\n".join(blocks)
         )
 
@@ -699,25 +760,22 @@ class RepoAgent:
         usage = getattr(resp, "token_usage", None)
         in_val = getattr(usage, "input_tokens", 0) if usage else 0
         out_val = getattr(usage, "output_tokens", 0) if usage else 0
-        if type(in_val).__name__ == "MagicMock":
+        try:
+            in_tok = int(in_val or 0)
+        except (TypeError, ValueError):
             in_tok = 0
-        else:
-            try:
-                in_tok = int(in_val or 0)
-            except (TypeError, ValueError):
-                in_tok = 0
-
-        if type(out_val).__name__ == "MagicMock":
+        try:
+            out_tok = int(out_val or 0)
+        except (TypeError, ValueError):
             out_tok = 0
-        else:
-            try:
-                out_tok = int(out_val or 0)
-            except (TypeError, ValueError):
-                out_tok = 0
         self._last_fast_tokens = (in_tok, out_tok)
 
         answer = str(getattr(resp, "content", "") or "").strip()
-        if not answer:
+        if not answer or "NEED_TOOLS" in answer:
+            logger.info(
+                "Fast-Path non applicabile ('%s'): fallback trasparente al ReAct loop.",
+                "NEED_TOOLS" if "NEED_TOOLS" in answer else "risposta vuota",
+            )
             return None
 
         report = check_citations(answer, self.index.files, self._ctx.file_text)
@@ -753,6 +811,9 @@ class RepoAgent:
             self.unpin()
             if not question:
                 return "Routing automatico riattivato.", []
+            routed = route_mode(question)
+            if routed:
+                self.set_mode(routed)
         elif forced:
             self.set_mode(forced, pin=True)
             if not question:
@@ -761,6 +822,13 @@ class RepoAgent:
             routed = route_mode(question)
             if routed:
                 self.set_mode(routed)
+
+        # Aggiorna dinamicamente i tool dell'agente con eventuali tool hints per la specifica domanda
+        active_tools = self._tools_for(self.mode, question)
+        final_tool = self.agent.tools.get("final_answer")
+        self.agent.tools = {t.name: t for t in active_tools}
+        if final_tool is not None:
+            self.agent.tools["final_answer"] = final_tool
 
         self.last = AskStats(mode=self.mode)
         key = self._cache_key(question, history)
