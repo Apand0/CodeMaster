@@ -72,5 +72,26 @@
     "nvidia": {
         "model_id": "nvidia/nemotron-3-ultra-550b-a55b:free",
         "api_base": "https://api.kilo.ai/api/gateway"
+    },
+
+    "claude": {
+        "type": "cli",
+        "command": "claude",
+        "mode": "mcp"
+    },
+    "codex": {
+        "type": "cli",
+        "command": "codex",
+        "mode": "mcp"
+    },
+    "vibe": {
+        "type": "cli",
+        "command": "vibe",
+        "mode": "mcp"
+    },
+    "agy": {
+        "type": "cli",
+        "command": "agy",
+        "mode": "mcp"
     }
 }

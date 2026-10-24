@@ -1,3 +1,5 @@
+test_token_optimization.py
+test_cli_backend.py
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -26,6 +28,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+.agents/
 
 # PyInstaller
 #   Usually these files are written by a python script from a template

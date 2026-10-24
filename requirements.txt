@@ -6,6 +6,9 @@ rank_bm25>=0.2.2
 smolagents[litellm]>=1.23.0
 gradio>=4.40.0
 numpy>=1.26.0
+python-dotenv>=1.0.0
+mcp>=2.3,<3
+uvicorn>=0.30
 
 # Opzionale: solo per --provider local (modello su GPU)
 # accelerate

@@ -20,6 +20,11 @@ def main() -> None:
         choices=available_choices,
         help="Provider o alias da utilizzare (es. da providers.json)",
     )
+    ap.add_argument(
+        "--fallback",
+        default="",
+        help="Provider API di riserva separati da virgola: rate limit API o errore CLI. Es. groq_120b,gemini_3.6",
+    )
     ap.add_argument("--model", default=None, help="model_id specifico")
     ap.add_argument(
         "--embedder",
@@ -28,19 +33,43 @@ def main() -> None:
         help="Strategia di embedding",
     )
     ap.add_argument("--rebuild", action="store_true", help="Forza la ricostruzione completa dell'indice")
+    ap.add_argument("--allow-exec", action="store_true", help="Abilita run_command: esegue comandi Python su una COPIA temporanea della repo")
+    ap.add_argument("--allow-web", action="store_true", help="Abilita web_lookup: ricerca web e lettura di pagine (il contenuto è trattato come dato)")
+    ap.add_argument("--no-cache", action="store_true", help="Disabilita la cache delle risposte (utile per misurare)")
+    ap.add_argument("--no-fast-path", action="store_true", help="Disabilita il fast-path RAG a step singolo")
+    ap.add_argument("--obs-budget", type=int, default=None, help="Caratteri di output dei tool tenuti in memoria prima di ridurre i più vecchi (0 = mai)")
     ap.add_argument("--share", action="store_true", help="Genera un link pubblico temporaneo Gradio")
     ap.add_argument("--port", type=int, default=7860, help="Porta locale per il server Gradio")
     args = ap.parse_args()
+    fallbacks = [a.strip() for a in args.fallback.split(",") if a.strip()]
+    unknown = [a for a in fallbacks if a not in available_choices]
+    if unknown:
+        ap.error(f"--fallback: provider sconosciuti: {', '.join(unknown)}")
+    cli_fallbacks = [a for a in fallbacks if providers_dict.get(a, {}).get("type") == "cli"]
+    if cli_fallbacks:
+        ap.error(f"--fallback accetta solo provider API: {', '.join(cli_fallbacks)}")
+    if args.share and providers_dict.get(args.provider, {}).get("type") == "cli":
+        ap.error("--share non è disponibile con provider CLI autenticati localmente.")
 
-    cfg = Config(embedder_type=args.embedder)
-    agent = create_agent(
-        args.source,
-        provider=args.provider,
-        model_id=args.model,
-        rebuild=args.rebuild,
-        cfg=cfg,
+    cfg = Config(
+        embedder_type=args.embedder, allow_exec=args.allow_exec, allow_web=args.allow_web,
+        use_answer_cache=not args.no_cache,
+        fast_path_enabled=not args.no_fast_path,
     )
-    launch_chat(agent, share=args.share, server_port=args.port)
+    if args.obs_budget is not None:
+        cfg.obs_budget_chars = args.obs_budget
+    try:
+        agent = create_agent(
+            args.source,
+            provider=args.provider,
+            model_id=args.model,
+            rebuild=args.rebuild,
+            cfg=cfg,
+            fallbacks=fallbacks or None,
+        )
+        launch_chat(agent, share=args.share, server_port=args.port)
+    except (ValueError, RuntimeError, FileNotFoundError) as exc:
+        ap.error(str(exc))
 
 
 if __name__ == "__main__":

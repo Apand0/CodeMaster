@@ -11,8 +11,6 @@ from typing import Any
 
 from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / "models.env", override=True)
-load_dotenv(BASE_DIR / ".env", override=True)
 
 
 def setup_logger(name: str = "repo_agent", level: int = logging.INFO) -> logging.Logger:
@@ -30,7 +28,10 @@ logger = setup_logger()
 
 
 def _init_env() -> None:
-    """Cerca e carica il file .env nella cartella del codice, nella parent directory o nella cwd."""
+    """Carica models.env (se c'è) e poi il primo .env trovato: cartella del codice, parent o cwd."""
+    models_env = BASE_DIR / "models.env"
+    if models_env.is_file():
+        load_dotenv(dotenv_path=models_env, override=True, encoding="utf-8-sig")
     candidates = [
         BASE_DIR / ".env",
         BASE_DIR.parent / ".env",
@@ -73,6 +74,39 @@ def detect_environment() -> str:
         return "colab"
     except ImportError:
         return "local"
+
+
+RATE_LIMIT_TOKENS = (
+    "429", "rate limit", "ratelimit", "resource_exhausted", "quota",
+    "too many requests", "overloaded", "503",
+)
+# Segnali di quota GIORNALIERA esaurita: aspettare pochi secondi non serve a nulla
+DAILY_QUOTA_TOKENS = ("per day", "daily", "tpd", "rpd", "per-day")
+
+
+def is_rate_limit_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(t in msg for t in RATE_LIMIT_TOKENS)
+
+
+def is_daily_quota_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(t in msg for t in DAILY_QUOTA_TOKENS)
+
+
+def call_with_backoff(fn: Any, *args: Any, max_retries: int = 4, base_delay: float = 6.0,
+                      label: str = "API", **kwargs: Any) -> Any:
+    """Chiama fn ritentando con backoff esponenziale solo sugli errori di rate limit (HTTP 429)."""
+    import time
+    for attempt in range(max_retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            if attempt >= max_retries or not is_rate_limit_error(exc) or is_daily_quota_error(exc):
+                raise
+            wait_s = base_delay * (2 ** attempt)
+            logger.warning("Rate limit %s (tentativo %d/%d). Attendo %.1fs...", label, attempt + 1, max_retries, wait_s)
+            time.sleep(wait_s)
 
 
 def default_work_dir() -> Path:
@@ -149,12 +183,30 @@ class Config:
     query_instruction: str = "Represent this sentence for searching relevant passages: "
 
     # --- Agente & Rate Limit Free Tier ---
-    max_steps: int = 14
-    max_tool_output_chars: int = 6500
-    repo_map_chars: int = 5500
-    history_turns: int = 4
+    # smolagents rimanda a OGNI step tutta la cronologia (prompt + tool + output precedenti):
+    # il costo cresce circa col quadrato dei passi, quindi step e output dei tool vanno tenuti corti.
+    max_steps: int = 10
+    max_tool_output_chars: int = 1800      # tetto output singolo tool (1800 car. permette 45 righe di codice piene)
+    read_default_lines: int = 45           # righe restituite da read_file di default (40-50 righe)
+    repo_map_chars: int = 1000             # mappa strutturale compatta nel system prompt
+    history_turns: int = 2                 # turni di conversazione passata mantenuti (compatto per non gonfiare TaskStep)
+    history_answer_chars: int = 600        # testa+coda di ogni risposta passata rimandata al modello
+    max_output_tokens: int = 4096          # tetto in uscita per chiamata (le risposte lunghe ne servono ~2-3k)
+    cli_timeout: int = 300                 # timeout per singola invocazione CLI locale
     llm_max_retries: int = 4
     llm_retry_base_delay: float = 6.0
+    fallback_providers: tuple[str, ...] = ()   # alias di providers.json da provare se il principale va in 429
+    llm_switch_after: int = 2              # fallimenti 429 sul provider corrente prima di passare al successivo
+    llm_cooldown_s: float = 90.0           # quanto tempo evitare un provider appena andato in rate limit
+    obs_budget_chars: int = 4000           # tetto budget osservazioni in memoria per rolling pruning selettivo
+    use_answer_cache: bool = True          # riusa le risposte finché i file citati non cambiano
+    fast_path_enabled: bool = True         # risoluzione RAG rapida a singolo step per query informative
+
+    # --- Strumenti opzionali (spenti di default, attivabili da CLI) ---
+    allow_exec: bool = False               # abilita run_command (su copia temporanea)
+    allow_web: bool = False                # abilita web_lookup
+    exec_max_copy_mb: int = 100            # dimensione massima della copia di sandbox
+    exec_timeout: int = 30                 # secondi di default per run_command
 
     @property
     def repos_dir(self) -> Path:
