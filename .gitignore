@@ -1,4 +1,5 @@
 test_token_optimization.py
+test_cli_backend.py
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

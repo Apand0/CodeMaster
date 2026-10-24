@@ -24,13 +24,10 @@ def _tool_schema(tool: Any) -> dict[str, Any]:
     required: list[str] = []
     signature = inspect.signature(tool.forward)
     for name, spec in tool.inputs.items():
-        entry: dict[str, Any] = {
+        props[name] = {
             "type": _json_type(spec.get("type", "string")),
             "description": str(spec.get("description", "")),
         }
-        if spec.get("nullable"):
-            entry["type"] = [entry["type"], "null"]
-        props[name] = entry
         param = signature.parameters.get(name)
         if param is not None and param.default is inspect.Parameter.empty:
             required.append(name)
@@ -77,6 +74,7 @@ class LocalMCPServer:
         self._tools: dict[str, Any] = {}
         self._trace: list[str] = []
         self._lock = threading.RLock()
+        self._exec_lock = threading.RLock()
         self._server: Any = None
         self._thread: threading.Thread | None = None
         self._socket: socket.socket | None = None
@@ -122,7 +120,12 @@ class LocalMCPServer:
                 bound = inspect.signature(tool.forward).bind(**arguments)
                 bound.apply_defaults()
                 _validate_tool_paths(tool, arguments)
-                result = await asyncio.to_thread(tool, **bound.arguments)
+
+                def _invoke() -> Any:
+                    with self._exec_lock:
+                        return tool(**bound.arguments)
+
+                result = await asyncio.to_thread(_invoke)
                 output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
                 summary = ", ".join(f"{key}={str(value)[:60]!r}" for key, value in arguments.items())
                 with self._lock:

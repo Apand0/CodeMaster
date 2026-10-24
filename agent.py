@@ -490,6 +490,7 @@ class RepoAgent:
         self._response_model = str(getattr(cli_backend, "model_id", "") or getattr(model, "model_id", "") or self.provider)
         self._response_fallback = False
         self._cli_error = ""
+        self._cli_cool_until: float = 0.0
         atexit.register(self.close)
 
     def _new_api_agent(self, model: Any) -> ToolCallingAgent:
@@ -819,7 +820,11 @@ class RepoAgent:
         ]
         resp = None
         cli_result = None
-        if self.cli_backend is not None:
+        now = time.time()
+        cli_available = (self.cli_backend is not None and
+                         now >= getattr(self, "_cli_cool_until", 0.0) and
+                         not self._cli_error)
+        if cli_available:
             try:
                 cli_result = self.cli_backend.complete(system_prompt, user_content)
             except Exception as exc:
@@ -827,6 +832,9 @@ class RepoAgent:
                 cli_result = CliResult(error=f"Invocazione CLI fallita: {type(exc).__name__}: {str(exc)[:400]}")
             if not cli_result.ok:
                 self._cli_error = cli_result.error
+                daily = is_daily_quota_error(Exception(cli_result.error))
+                cooldown = float(getattr(getattr(self, "cfg", None), "llm_cooldown_s", 90.0) or 90.0)
+                self._cli_cool_until = time.time() + (3600.0 if daily else cooldown)
                 if self.fallback_agent is None:
                     self.last.backend = "cli"
                     self.last.provider = self.provider
@@ -849,6 +857,18 @@ class RepoAgent:
                 self._response_provider = self.provider
                 self._response_model = str(getattr(self.cli_backend, "model_id", "") or self.provider)
                 self._response_fallback = False
+        elif self.cli_backend is not None:
+            if self.fallback_agent is None:
+                return f"CLI {self.provider} temporaneamente in cooldown.", [f"modo={self.mode}", "cli_cooldown"]
+            try:
+                resp = self.fallback_agent.model.generate(messages=messages)
+                self._response_backend = "api"
+                self._response_provider = self.fallback_provider
+                self._response_model = str(getattr(self.fallback_agent.model, "model_id", self.fallback_provider))
+                self._response_fallback = True
+            except Exception as exc:
+                logger.warning("Fast-Path generation fallita su fallback API (%s): passo al ReAct loop.", exc)
+                return None
         else:
             try:
                 resp = self.agent.model.generate(messages=messages)
@@ -950,7 +970,16 @@ class RepoAgent:
             if final_tool is not None:
                 api_agent.tools["final_answer"] = final_tool
 
-        self._cli_error = ""
+        now = time.time()
+        if self.cli_backend is not None and getattr(self, "_cli_cool_until", 0.0) > now:
+            logger.info(
+                "CLI %s in cooldown per altri %.1fs; passaggio automatico al fallback API.",
+                self.provider,
+                self._cli_cool_until - now,
+            )
+            self._cli_error = f"CLI in cooldown per altri {int(self._cli_cool_until - now)}s"
+        else:
+            self._cli_error = ""
         self._response_backend = self.backend
         self._response_provider = self.provider
         self._response_model = str(getattr(self.cli_backend, "model_id", "") or
@@ -992,6 +1021,7 @@ class RepoAgent:
         cli_trace: list[str] = []
         retries0 = getattr(getattr(api_agent, "model", None), "rate_limit_hits", 0)
         cli_result = None
+        from cli_backend import CliResult
         try:
             if self.cli_backend is not None and not self._cli_error:
                 try:
@@ -1001,9 +1031,20 @@ class RepoAgent:
                         [tool.name for tool in active_tools],
                     )
                 except Exception as exc:
-                    from cli_backend import CliResult
                     cli_result = CliResult(error=f"Invocazione CLI/MCP fallita: {type(exc).__name__}: {str(exc)[:400]}")
                 cli_trace = self._mcp_server.take_trace() if self._mcp_server is not None else []
+                if cli_result.ok:
+                    if active_tools and not cli_trace:
+                        rep = check_citations(cli_result.text, self.index.files, self._ctx.file_text)
+                        if not rep.valid or rep.problems:
+                            logger.warning(
+                                "CLI %s ha risposto senza tool MCP e le citazioni non sono convalidate; fallback all'API.",
+                                self.provider,
+                            )
+                            cli_result = CliResult(
+                                error="La CLI non ha utilizzato gli strumenti MCP e le citazioni non sono convalidate.",
+                                ok=False,
+                            )
                 if cli_result.ok:
                     answer = cli_result.text
                     self._response_backend = "cli"
@@ -1015,6 +1056,9 @@ class RepoAgent:
                     self.progress.out_tok += cli_result.out_tokens
                 else:
                     self._cli_error = cli_result.error
+                    daily = is_daily_quota_error(Exception(cli_result.error))
+                    cooldown = float(getattr(getattr(self, "cfg", None), "llm_cooldown_s", 90.0) or 90.0)
+                    self._cli_cool_until = time.time() + (3600.0 if daily else cooldown)
                     if self.fallback_agent is None:
                         self.progress.finish()
                         self.last.backend = "cli"
@@ -1037,7 +1081,12 @@ class RepoAgent:
                     self._response_provider = str(getattr(api_agent.model, "last_provider", self._response_provider))
             else:
                 if api_agent is None:
-                    raise RuntimeError("Il provider CLI è fallito e non è configurato un fallback API.")
+                    raise RuntimeError("Il provider CLI è fallito o in cooldown e non è configurato un fallback API.")
+                if self.cli_backend is not None:
+                    self._response_backend = "api"
+                    self._response_provider = self.fallback_provider
+                    self._response_model = str(getattr(api_agent.model, "model_id", self.fallback_provider))
+                    self._response_fallback = True
                 answer = api_agent.run(self._compose_task(question, history), reset=True)
                 if self._response_backend == "api":
                     self._response_model = str(getattr(api_agent.model, "last_model_id", getattr(api_agent.model, "model_id", self.provider)))

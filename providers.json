@@ -74,22 +74,22 @@
         "api_base": "https://api.kilo.ai/api/gateway"
     },
 
-    "claude_cli": {
+    "claude": {
         "type": "cli",
         "command": "claude",
         "mode": "mcp"
     },
-    "codex_cli": {
+    "codex": {
         "type": "cli",
         "command": "codex",
         "mode": "mcp"
     },
-    "mistral_vibe_cli": {
+    "vibe": {
         "type": "cli",
         "command": "vibe",
         "mode": "mcp"
     },
-    "antigravity_cli": {
+    "agy": {
         "type": "cli",
         "command": "agy",
         "mode": "mcp"
