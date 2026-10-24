@@ -69,6 +69,28 @@ python run_cli.py https://github.com/utente/repo.git
 --obs-budget 50000       # Budget memoria output
 ```
 
+### CLI LLM autenticati localmente
+
+`--provider` accetta anche `claude_cli`, `codex_cli`, `mistral_vibe_cli` e `antigravity_cli`. Installa la CLI del provider e completa il login nel terminale prima di avviare CodeMaster:
+
+| Alias | Eseguibile | Installazione e login |
+|---|---|---|
+| `claude_cli` | `claude` | [Claude Code](https://docs.anthropic.com/en/docs/claude-code/cli-usage) |
+| `codex_cli` | `codex` | [Codex CLI](https://developers.openai.com/codex/cli/) |
+| `mistral_vibe_cli` | `vibe` | [Mistral Vibe CLI](https://docs.mistral.ai/vibe/code/cli/install-setup) |
+| `antigravity_cli` | `agy` | [Antigravity CLI](https://github.com/google-antigravity/antigravity-cli) |
+
+```bash
+python run_cli.py /percorso/repo --provider claude_cli
+python run_cli.py /percorso/repo --provider codex_cli --fallback gemini_3.8
+```
+
+CodeMaster non installa le CLI e non effettua il login. Il backend avvia la CLI selezionata in una cartella temporanea e passa le domande via stdin. Per le richieste che richiedono lettura della repo, espone via MCP solo gli strumenti attivi per modalità e domanda; `web_lookup` e `run_command` restano subordinati a `--allow-web` e `--allow-exec`. L'endpoint MCP ascolta solo su loopback e usa una porta e un bearer temporanei. Le variabili d'ambiente con suffisso `_API_KEY` o `_API_TOKEN` vengono rimosse dal processo CLI, che usa quindi la propria sessione autenticata.
+
+Per Mistral Vibe completa il setup preventivamente con `vibe --setup`: usa l'accesso browser o salva la credenziale nel keyring/file `.vibe` dell'utente, perché le variabili API della shell non vengono inoltrate a CodeMaster.
+
+`--fallback` accetta solo alias API: un errore della CLI usa API a consumo solo quando il fallback è configurato. Senza fallback viene mostrato l'errore della CLI. L'uso dei provider CLI richiede un ambiente locale con binario e login disponibili; Kaggle, Colab e `--share` Gradio non sono supportati. Le versioni delle CLI possono cambiare opzioni o configurazione MCP: aggiornale e verifica `--help` se CodeMaster segnala un errore di avvio.
+
 ### Modalità Web (Gradio)
 
 ```bash

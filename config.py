@@ -192,6 +192,7 @@ class Config:
     history_turns: int = 2                 # turni di conversazione passata mantenuti (compatto per non gonfiare TaskStep)
     history_answer_chars: int = 600        # testa+coda di ogni risposta passata rimandata al modello
     max_output_tokens: int = 4096          # tetto in uscita per chiamata (le risposte lunghe ne servono ~2-3k)
+    cli_timeout: int = 300                 # timeout per singola invocazione CLI locale
     llm_max_retries: int = 4
     llm_retry_base_delay: float = 6.0
     fallback_providers: tuple[str, ...] = ()   # alias di providers.json da provare se il principale va in 429

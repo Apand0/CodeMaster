@@ -6,7 +6,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 MAX_ENTRIES = 200
 
@@ -29,17 +29,21 @@ class AnswerCache:
             self._data = {}
 
     def get(self, key: str, sha_of: Callable[[str], str]) -> str | None:
+        record = self.get_record(key, sha_of)
+        return str(record["answer"]) if record is not None else None
+
+    def get_record(self, key: str, sha_of: Callable[[str], str]) -> dict | None:
         entry = self._data.get(key)
         if entry is None:
             return None
         if all(sha_of(rel) == sha for rel, sha in entry["deps"].items()):
-            return entry["answer"]
+            return dict(entry)
         del self._data[key]          # un file citato è cambiato: la risposta è da rifare
         self._save()
         return None
 
-    def put(self, key: str, question: str, answer: str, deps: dict[str, str]) -> None:
-        self._data[key] = {"q": question[:200], "answer": answer, "deps": deps, "ts": time.time()}
+    def put(self, key: str, question: str, answer: str, deps: dict[str, str], **metadata: Any) -> None:
+        self._data[key] = {"q": question[:200], "answer": answer, "deps": deps, "ts": time.time(), **metadata}
         for old in sorted(self._data, key=lambda k: self._data[k]["ts"])[: max(0, len(self._data) - MAX_ENTRIES)]:
             del self._data[old]
         self._save()

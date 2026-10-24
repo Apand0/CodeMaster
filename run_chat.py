@@ -23,7 +23,7 @@ def main() -> None:
     ap.add_argument(
         "--fallback",
         default="",
-        help="Provider di riserva separati da virgola (alias di providers.json), usati se il principale va in rate limit. Es. groq_120b,gemini_3.6",
+        help="Provider API di riserva separati da virgola: rate limit API o errore CLI. Es. groq_120b,gemini_3.6",
     )
     ap.add_argument("--model", default=None, help="model_id specifico")
     ap.add_argument(
@@ -45,6 +45,11 @@ def main() -> None:
     unknown = [a for a in fallbacks if a not in available_choices]
     if unknown:
         ap.error(f"--fallback: provider sconosciuti: {', '.join(unknown)}")
+    cli_fallbacks = [a for a in fallbacks if providers_dict.get(a, {}).get("type") == "cli"]
+    if cli_fallbacks:
+        ap.error(f"--fallback accetta solo provider API: {', '.join(cli_fallbacks)}")
+    if args.share and providers_dict.get(args.provider, {}).get("type") == "cli":
+        ap.error("--share non è disponibile con provider CLI autenticati localmente.")
 
     cfg = Config(
         embedder_type=args.embedder, allow_exec=args.allow_exec, allow_web=args.allow_web,
@@ -53,15 +58,18 @@ def main() -> None:
     )
     if args.obs_budget is not None:
         cfg.obs_budget_chars = args.obs_budget
-    agent = create_agent(
-        args.source,
-        provider=args.provider,
-        model_id=args.model,
-        rebuild=args.rebuild,
-        cfg=cfg,
-        fallbacks=fallbacks or None,
-    )
-    launch_chat(agent, share=args.share, server_port=args.port)
+    try:
+        agent = create_agent(
+            args.source,
+            provider=args.provider,
+            model_id=args.model,
+            rebuild=args.rebuild,
+            cfg=cfg,
+            fallbacks=fallbacks or None,
+        )
+        launch_chat(agent, share=args.share, server_port=args.port)
+    except (ValueError, RuntimeError, FileNotFoundError) as exc:
+        ap.error(str(exc))
 
 
 if __name__ == "__main__":

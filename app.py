@@ -136,6 +136,8 @@ def launch_chat(
     env = detect_environment()
     if share is None:
         share = env in ("colab", "kaggle")
+    if share and getattr(agent, "backend", "api") == "cli":
+        raise ValueError("La condivisione Gradio non è consentita con provider CLI autenticati localmente.")
 
     ui = build_ui(agent)
     return ui.launch(

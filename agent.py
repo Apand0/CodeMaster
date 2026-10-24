@@ -1,12 +1,14 @@
 """Fase 5: Agente ReAct con supporto a providers.json (Gemini, Groq, Cloudflare) e `.env`."""
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import re
 import sys
 import time
 import shutil
+import threading
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -14,7 +16,7 @@ from smolagents import ToolCallingAgent, LiteLLMModel, OpenAIModel, ActionStep
 from smolagents.monitoring import LogLevel
 
 from chunker import Chunk
-from config import Config, get_secret, is_daily_quota_error, is_rate_limit_error, logger
+from config import Config, detect_environment, get_secret, is_daily_quota_error, is_rate_limit_error, logger
 from indexer import RepoIndex
 from citations import check_citations, render_panel
 from ingest import clone_repo, file_sha256
@@ -23,6 +25,7 @@ from prompts import (
     DEFAULT_MODE,
     LEAN_SYSTEM_PROMPT_TEMPLATE,
     MODES,
+    build_cli_instructions,
     build_instructions,
     parse_mode_prefix,
     route_mode,
@@ -49,6 +52,8 @@ class ResilientModelWrapper:
         self._max_retries = max_retries
         self._base_delay = base_delay
         self._models: list[Any] = [inner_model, *(fallbacks or [])]
+        self.last_model_id = self._label(inner_model)
+        self.last_provider = self.last_model_id
         self._switch_after = max(1, switch_after)
         self._cooldown_s = cooldown_s
         self._cool_until: dict[int, float] = {}   # indice modello -> istante fino a cui evitarlo
@@ -80,7 +85,10 @@ class ResilientModelWrapper:
             tries = self._max_retries if is_last else self._switch_after - 1
             for attempt in range(tries + 1):
                 try:
-                    return fn(*args, **kwargs)
+                    result = fn(*args, **kwargs)
+                    self.last_model_id = self._label(model)
+                    self.last_provider = self.last_model_id
+                    return result
                 except Exception as exc:
                     if not is_rate_limit_error(exc):
                         raise
@@ -121,6 +129,8 @@ def _make_raw_model(
     # Se viene passato un alias presente in providers.json (es. "groq_120b", "cloudfare_glm-5.3", ecc.)
     if provider in providers_map:
         p_info = providers_map[provider]
+        if p_info.get("type") == "cli":
+            raise ValueError(f"'{provider}' è una CLI locale e non può essere creato come modello API.")
         m_id = model_id or p_info["model_id"]
         env_var = p_info.get("env_key")  # opzionale: alcuni provider free non hanno chiave
         # prompt_if_missing=False: non chiedere la chiave con getpass se non serve
@@ -171,6 +181,8 @@ def _make_raw_model(
 def _has_credentials(provider: str, cfg: Config) -> bool:
     """True se il provider può essere usato senza chiedere nulla all'utente (chiave presente o non richiesta)."""
     info = cfg.providers.get(provider)
+    if info and info.get("type") == "cli":
+        return bool(shutil.which(str(info.get("command", ""))))
     if info is None:
         env_var = {"gemini": "GEMINI_API_KEY", "groq": "GROQ_API_KEY"}.get(provider.lower())
         return bool(env_var and get_secret(env_var, prompt_if_missing=False))
@@ -191,10 +203,14 @@ def build_model(
     # Tetto ai token in uscita: senza, un free tier può bruciare la quota con risposte/tool call enormi
     kw.setdefault("max_tokens", cfg.max_output_tokens)
 
+    fallback_aliases = list(fallbacks if fallbacks is not None else cfg.fallback_providers)
+    cli_fallbacks = [a for a in fallback_aliases if cfg.providers.get(a, {}).get("type") == "cli"]
+    if cli_fallbacks:
+        raise ValueError(f"--fallback accetta solo provider API; alias CLI: {', '.join(cli_fallbacks)}")
     primary = _make_raw_model(provider, model_id, api_key, cfg, **dict(kw))
 
     backups: list[Any] = []
-    for alias in (fallbacks if fallbacks is not None else cfg.fallback_providers):
+    for alias in fallback_aliases:
         if alias == provider:
             continue
         if not _has_credentials(alias, cfg):
@@ -413,11 +429,18 @@ class AskStats:
     retries: int = 0
     cache_hit: bool = False
     bad_citations: list[str] = field(default_factory=list)
+    backend: str = "api"
+    provider: str = ""
+    model: str = ""
+    fallback: bool = False
 
     def line(self) -> str:
+        label = f"{self.backend}:{self.provider}" if self.provider else self.backend
+        if self.fallback:
+            label += " (fallback)"
         if self.cache_hit:
-            return "⚡ risposta dalla cache: 0 token"
-        return f"{self.steps} step · in {self.in_tok:,} · out {self.out_tok:,} · {self.secs:.1f}s · {self.retries} retry"
+            return f"⚡ cache · {label}: 0 token"
+        return f"{label} · {self.steps} step · in {self.in_tok:,} · out {self.out_tok:,} · {self.secs:.1f}s · {self.retries} retry"
 
 
 _ML_RE = re.compile(r"\b(torch|tensorflow|jax|keras|sklearn|transformers|diffusers)\b")
@@ -438,7 +461,9 @@ _TOOL_HINTS: list[tuple[re.Pattern[str], tuple[str, ...]]] = [
 
 
 class RepoAgent:
-    def __init__(self, index: RepoIndex, model: Any, cfg: Config | None = None) -> None:
+    def __init__(self, index: RepoIndex, model: Any = None, cfg: Config | None = None, *,
+                 cli_backend: Any = None, provider: str = "", fallback_model: Any = None,
+                 fallback_provider: str = "") -> None:
         self.index = index
         self.cfg = cfg or index.cfg
         self.progress = StepProgress(self.cfg.max_steps)
@@ -452,19 +477,34 @@ class RepoAgent:
         self._store_dir = RepoIndex.index_path(self.cfg, index.repo_root)
         self.cache = AnswerCache(self._store_dir / "qa_cache.json")
         self.last = AskStats()
-        base_agent = ToolCallingAgent(tools=[], model=model)
-        templates = dict(base_agent.prompt_templates)
-        templates["system_prompt"] = LEAN_SYSTEM_PROMPT_TEMPLATE
+        self.cli_backend = cli_backend
+        self.provider = provider or str(getattr(model, "model_id", ""))
+        self.fallback_provider = fallback_provider or str(getattr(fallback_model, "model_id", ""))
+        self.backend = "cli" if cli_backend is not None else "api"
+        self.agent = self._new_api_agent(model) if model is not None else None
+        self.fallback_agent = self._new_api_agent(fallback_model) if fallback_model is not None else None
+        self._mcp_server: Any = None
+        self._ask_lock = threading.RLock()
+        self._response_backend = self.backend
+        self._response_provider = self.provider
+        self._response_model = str(getattr(cli_backend, "model_id", "") or getattr(model, "model_id", "") or self.provider)
+        self._response_fallback = False
+        self._cli_error = ""
+        atexit.register(self.close)
 
-        self.agent = ToolCallingAgent(
-            tools=self._tools_for(self.mode),
-            model=model,
-            instructions=self._instructions(self.mode),
-            max_steps=self.cfg.max_steps,
-            verbosity_level=LogLevel.OFF,
-            step_callbacks={ActionStep: [self.progress, self._shrink_memory]},
-            prompt_templates=templates,
+    def _new_api_agent(self, model: Any) -> ToolCallingAgent:
+        base = ToolCallingAgent(tools=[], model=model)
+        templates = dict(base.prompt_templates)
+        templates["system_prompt"] = LEAN_SYSTEM_PROMPT_TEMPLATE
+        return ToolCallingAgent(
+            tools=self._tools_for(self.mode), model=model, instructions=self._instructions(self.mode),
+            max_steps=self.cfg.max_steps, verbosity_level=LogLevel.OFF,
+            step_callbacks={ActionStep: [self.progress, self._shrink_memory]}, prompt_templates=templates,
         )
+
+    def close(self) -> None:
+        if self._mcp_server is not None:
+            self._mcp_server.close()
 
     def _tools_for(self, mode: str, question: str | None = None) -> list[Any]:
         """Solo gli strumenti utili alla modalità (descrizione e schema di ogni tool costano token a OGNI step).
@@ -487,6 +527,11 @@ class RepoAgent:
             mode, self.index.repo_root.name, self._stats, self._repo_map, ml=self._has_ml
         )
 
+    def _cli_instructions(self, mode: str) -> str:
+        return build_cli_instructions(
+            mode, self.index.repo_root.name, self._stats, self._repo_map, ml=self._has_ml
+        )
+
     def set_mode(self, mode: str, pin: bool = False) -> None:
         """Cambia il set di istruzioni e rigenera il system prompt di smolagents."""
         if mode not in MODES:
@@ -496,19 +541,25 @@ class RepoAgent:
         if mode == self.mode:
             return
         self.mode = mode
-        self.agent.instructions = self._instructions(mode)
-        final = self.agent.tools.get("final_answer")
-        self.agent.tools = {t.name: t for t in self._tools_for(mode)}
-        if final is not None:
-            self.agent.tools["final_answer"] = final
-        self._refresh_system_prompt()
+        for agent in (self.agent, self.fallback_agent):
+            if agent is None:
+                continue
+            agent.instructions = self._instructions(mode)
+            final = agent.tools.get("final_answer")
+            agent.tools = {t.name: t for t in self._tools_for(mode)}
+            if final is not None:
+                agent.tools["final_answer"] = final
+            self._refresh_system_prompt(agent)
 
-    def _refresh_system_prompt(self) -> None:
+    def _refresh_system_prompt(self, agent: Any = None) -> None:
         """system_prompt è read-only: si aggiorna invece il passo di sistema in memoria."""
         from smolagents.memory import SystemPromptStep
 
-        self.agent.memory.system_prompt = SystemPromptStep(
-            system_prompt=self.agent.initialize_system_prompt()
+        agent = agent or self.agent or self.fallback_agent
+        if agent is None:
+            return
+        agent.memory.system_prompt = SystemPromptStep(
+            system_prompt=agent.initialize_system_prompt()
         )
 
     def unpin(self) -> None:
@@ -516,8 +567,11 @@ class RepoAgent:
         self.set_mode(DEFAULT_MODE)
 
     def _shrink_memory(self, step: ActionStep, agent: Any = None) -> None:
+        agent = agent or self.agent or self.fallback_agent
+        if agent is None:
+            return
         freed = shrink_old_observations(
-            self.agent.memory.steps,
+            agent.memory.steps,
             budget=self.cfg.obs_budget_chars,
             current_step=step,
         )
@@ -535,11 +589,14 @@ class RepoAgent:
             return None
         sig = hashlib.sha1((CORE + MODES[self.mode].body).encode("utf-8")).hexdigest()[:8]
         prev = [q for q, _ in (history or [])[-self.cfg.history_turns :]]
-        return make_key(question, self.mode, str(getattr(self.agent.model, "model_id", "")), sig, prev)
+        model_id = (self.provider if self.cli_backend is not None else
+                    str(getattr(self.agent.model, "model_id", "")))
+        return make_key(question, self.mode, model_id, sig, prev)
 
     def _log_telemetry(self, question: str) -> None:
         try:
-            m_id = str(getattr(self.agent.model, "model_id", ""))
+            m_id = self.last.model or (self.provider if self.cli_backend is not None else
+                                       str(getattr(self.agent.model, "model_id", "")))
             data = asdict(self.last)
             for k, v in list(data.items()):
                 if not isinstance(v, (str, int, float, bool, list, dict, type(None))):
@@ -548,12 +605,21 @@ class RepoAgent:
                 "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "q": question[:80],
                 "model": m_id,
+                "backend": self.last.backend,
+                "provider": self.last.provider,
                 **data,
             }
             with open(self._store_dir / "telemetry.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         except Exception as exc:
             logger.debug("Telemetria non scritta: %s", exc)
+
+    def _local_mcp(self, active_tools: list[Any]) -> tuple[str, str]:
+        if self._mcp_server is None:
+            from mcp_server import LocalMCPServer
+            self._mcp_server = LocalMCPServer()
+        self._mcp_server.set_tools(active_tools)
+        return self._mcp_server.start()
 
     def onboarding(self) -> str:
         """Guida iniziale alla repo (0 token LLM)."""
@@ -751,26 +817,67 @@ class RepoAgent:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ]
-        try:
-            resp = self.agent.model.generate(messages=messages)
-        except Exception as exc:
-            logger.warning("Fast-Path generation fallita (%s): fallback trasparente al ReAct loop.", exc)
-            return None
+        resp = None
+        cli_result = None
+        if self.cli_backend is not None:
+            try:
+                cli_result = self.cli_backend.complete(system_prompt, user_content)
+            except Exception as exc:
+                from cli_backend import CliResult
+                cli_result = CliResult(error=f"Invocazione CLI fallita: {type(exc).__name__}: {str(exc)[:400]}")
+            if not cli_result.ok:
+                self._cli_error = cli_result.error
+                if self.fallback_agent is None:
+                    self.last.backend = "cli"
+                    self.last.provider = self.provider
+                    self.last.model = self.provider
+                    self.last.secs = time.time() - t0
+                    self._log_telemetry(question)
+                    return f"Errore CLI {self.provider}: {cli_result.error}", [f"modo={self.mode}", "cli_error"]
+                try:
+                    resp = self.fallback_agent.model.generate(messages=messages)
+                    self._response_backend = "api"
+                    self._response_provider = self.fallback_provider
+                    self._response_model = str(getattr(self.fallback_agent.model, "model_id", self.fallback_provider))
+                    self._response_fallback = True
+                except Exception as exc:
+                    logger.warning("Fast-Path CLI/API fallito (%s): passo al ciclo agentico API.", exc)
+                    return None
+            else:
+                answer = cli_result.text.strip()
+                self._response_backend = "cli"
+                self._response_provider = self.provider
+                self._response_model = str(getattr(self.cli_backend, "model_id", "") or self.provider)
+                self._response_fallback = False
+        else:
+            try:
+                resp = self.agent.model.generate(messages=messages)
+            except Exception as exc:
+                logger.warning("Fast-Path generation fallita (%s): fallback trasparente al ReAct loop.", exc)
+                return None
 
-        usage = getattr(resp, "token_usage", None)
-        in_val = getattr(usage, "input_tokens", 0) if usage else 0
-        out_val = getattr(usage, "output_tokens", 0) if usage else 0
-        try:
-            in_tok = int(in_val or 0)
-        except (TypeError, ValueError):
-            in_tok = 0
-        try:
-            out_tok = int(out_val or 0)
-        except (TypeError, ValueError):
-            out_tok = 0
+        if resp is not None:
+            usage = getattr(resp, "token_usage", None)
+            in_val = getattr(usage, "input_tokens", 0) if usage else 0
+            out_val = getattr(usage, "output_tokens", 0) if usage else 0
+            try:
+                in_tok = int(in_val or 0)
+            except (TypeError, ValueError):
+                in_tok = 0
+            try:
+                out_tok = int(out_val or 0)
+            except (TypeError, ValueError):
+                out_tok = 0
+            answer = str(getattr(resp, "content", "") or "").strip()
+            model = self.fallback_agent.model if self._response_fallback else getattr(self.agent, "model", None)
+            if model is not None:
+                self._response_model = str(getattr(model, "last_model_id", getattr(model, "model_id", self._response_model)))
+                self._response_provider = str(getattr(model, "last_provider", self._response_provider))
+        else:
+            in_tok = int(cli_result.in_tokens or 0)
+            out_tok = int(cli_result.out_tokens or 0)
         self._last_fast_tokens = (in_tok, out_tok)
 
-        answer = str(getattr(resp, "content", "") or "").strip()
         if not answer or "NEED_TOOLS" in answer:
             logger.info(
                 "Fast-Path non applicabile ('%s'): fallback trasparente al ReAct loop.",
@@ -794,18 +901,28 @@ class RepoAgent:
         st.secs = time.time() - t0
         st.retries = 0
         st.bad_citations = report.problems
+        st.backend = self._response_backend
+        st.provider = self._response_provider
+        st.model = self._response_model
+        st.fallback = self._response_fallback
 
         key = self._cache_key(question, history)
         if key is not None and report.valid and not report.problems:
             deps = {rel: self._sha(rel) for rel in {r for r, _, _ in report.valid}}
             if "" not in deps.values():
-                self.cache.put(key, question, answer, deps)
+                self.cache.put(key, question, answer, deps, backend=st.backend, provider=st.provider,
+                               model=st.model, fallback=st.fallback)
         self._log_telemetry(question)
 
         trace = [f"modo={self.mode}", "fast_path"]
         return answer, trace
 
     def ask(self, question: str, history: list[tuple[str, str]] | None = None) -> tuple[str, list[str]]:
+        # Tool allow-lists and agent memory are per-question state; serialize shared UI requests.
+        with self._ask_lock:
+            return self._ask_locked(question, history)
+
+    def _ask_locked(self, question: str, history: list[tuple[str, str]] | None = None) -> tuple[str, list[str]]:
         cmd, forced, question = parse_mode_prefix(question)
         if cmd == "/auto":
             self.unpin()
@@ -825,19 +942,35 @@ class RepoAgent:
 
         # Aggiorna dinamicamente i tool dell'agente con eventuali tool hints per la specifica domanda
         active_tools = self._tools_for(self.mode, question)
-        final_tool = self.agent.tools.get("final_answer")
-        self.agent.tools = {t.name: t for t in active_tools}
-        if final_tool is not None:
-            self.agent.tools["final_answer"] = final_tool
+        for api_agent in (self.agent, self.fallback_agent):
+            if api_agent is None:
+                continue
+            final_tool = api_agent.tools.get("final_answer")
+            api_agent.tools = {t.name: t for t in active_tools}
+            if final_tool is not None:
+                api_agent.tools["final_answer"] = final_tool
 
-        self.last = AskStats(mode=self.mode)
+        self._cli_error = ""
+        self._response_backend = self.backend
+        self._response_provider = self.provider
+        self._response_model = str(getattr(self.cli_backend, "model_id", "") or
+                                   getattr(getattr(self.agent, "model", None), "model_id", "") or self.provider)
+        self._response_fallback = False
+        self.last = AskStats(
+            mode=self.mode, backend=self.backend, provider=self.provider,
+            model=self._response_model,
+        )
         key = self._cache_key(question, history)
         if key is not None:
-            cached = self.cache.get(key, self._sha)
-            if cached is not None:
+            record = self.cache.get_record(key, self._sha)
+            if record is not None:
                 self.last.cache_hit = True
+                self.last.backend = str(record.get("backend", self.backend))
+                self.last.provider = str(record.get("provider", self.provider))
+                self.last.model = str(record.get("model", self.last.model))
+                self.last.fallback = bool(record.get("fallback", False))
                 self._log_telemetry(question)
-                return cached, [f"modo={self.mode}", "cache"]
+                return str(record["answer"]), [f"modo={self.mode}", "cache"]
 
         self._last_fast_tokens = (0, 0)
         # R1: Fast-Path RAG a step singolo per query informative / consultazione simboli o file
@@ -855,11 +988,68 @@ class RepoAgent:
             self.progress.out_tok += int(fast_out or 0)
         except (TypeError, ValueError):
             pass
-        retries0 = getattr(self.agent.model, "rate_limit_hits", 0)
+        api_agent = self.fallback_agent if self._cli_error else self.agent
+        cli_trace: list[str] = []
+        retries0 = getattr(getattr(api_agent, "model", None), "rate_limit_hits", 0)
+        cli_result = None
         try:
-            answer = self.agent.run(self._compose_task(question, history), reset=True)
+            if self.cli_backend is not None and not self._cli_error:
+                try:
+                    url, token = self._local_mcp(active_tools)
+                    cli_result = self.cli_backend.agentic(
+                        self._cli_instructions(self.mode), self._compose_task(question, history), url, token,
+                        [tool.name for tool in active_tools],
+                    )
+                except Exception as exc:
+                    from cli_backend import CliResult
+                    cli_result = CliResult(error=f"Invocazione CLI/MCP fallita: {type(exc).__name__}: {str(exc)[:400]}")
+                cli_trace = self._mcp_server.take_trace() if self._mcp_server is not None else []
+                if cli_result.ok:
+                    answer = cli_result.text
+                    self._response_backend = "cli"
+                    self._response_provider = self.provider
+                    self._response_model = str(getattr(self.cli_backend, "model_id", "") or self.provider)
+                    self._response_fallback = False
+                    self.progress.step = max(cli_result.turns, len(cli_trace))
+                    self.progress.in_tok += cli_result.in_tokens
+                    self.progress.out_tok += cli_result.out_tokens
+                else:
+                    self._cli_error = cli_result.error
+                    if self.fallback_agent is None:
+                        self.progress.finish()
+                        self.last.backend = "cli"
+                        self.last.provider = self.provider
+                        self.last.model = str(getattr(self.cli_backend, "model_id", "") or self.provider)
+                        self.last.steps = len(cli_trace)
+                        self.last.in_tok = self.progress.in_tok
+                        self.last.out_tok = self.progress.out_tok
+                        self.last.secs = time.time() - self.progress.t0
+                        self._log_telemetry(question)
+                        return f"Errore CLI {self.provider}: {cli_result.error}", [f"modo={self.mode}", *cli_trace, "cli_error"]
+                    api_agent = self.fallback_agent
+                    self._response_backend = "api"
+                    self._response_provider = self.fallback_provider
+                    self._response_model = str(getattr(api_agent.model, "model_id", self.fallback_provider))
+                    self._response_fallback = True
+                    retries0 = getattr(api_agent.model, "rate_limit_hits", 0)
+                    answer = api_agent.run(self._compose_task(question, history), reset=True)
+                    self._response_model = str(getattr(api_agent.model, "last_model_id", api_agent.model.model_id))
+                    self._response_provider = str(getattr(api_agent.model, "last_provider", self._response_provider))
+            else:
+                if api_agent is None:
+                    raise RuntimeError("Il provider CLI è fallito e non è configurato un fallback API.")
+                answer = api_agent.run(self._compose_task(question, history), reset=True)
+                if self._response_backend == "api":
+                    self._response_model = str(getattr(api_agent.model, "last_model_id", getattr(api_agent.model, "model_id", self.provider)))
+                    self._response_provider = str(getattr(api_agent.model, "last_provider", self._response_provider))
         except Exception as exc:
             self.progress.finish()
+            self.last.backend = self._response_backend
+            self.last.provider = self._response_provider
+            self.last.model = self._response_model
+            self.last.fallback = self._response_fallback
+            self.last.secs = time.time() - self.progress.t0
+            self._log_telemetry(question)
             return f"Errore durante la chiamata al modello: {type(exc).__name__}: {str(exc)[:400]}", []
         self.progress.finish()
         answer = str(answer)
@@ -867,32 +1057,42 @@ class RepoAgent:
         st = self.last
         st.steps, st.in_tok, st.out_tok = self.progress.step, self.progress.in_tok, self.progress.out_tok
         st.secs = time.time() - self.progress.t0
+        st.backend = self._response_backend
+        st.provider = self._response_provider
+        st.model = self._response_model
+        st.fallback = self._response_fallback
         try:
-            hits = int(getattr(self.agent.model, "rate_limit_hits", 0) or 0)
+            hits = int(getattr(getattr(api_agent, "model", None), "rate_limit_hits", 0) or 0)
             st.retries = max(0, hits - int(retries0 or 0))
         except (TypeError, ValueError):
             st.retries = 0
         report = check_citations(answer, self.index.files, self._ctx.file_text)
         st.bad_citations = report.problems
-        # si salva solo una risposta completa, con almeno una citazione verificata e nessuna citazione sospetta
-        completed = any(getattr(s, "is_final_answer", False) for s in self.agent.memory.steps)
+        completed = bool(cli_result and cli_result.ok) or any(
+            getattr(s, "is_final_answer", False) for s in getattr(getattr(api_agent, "memory", None), "steps", [])
+        )
         if key is not None and completed and report.valid and not report.problems:
             deps = {rel: self._sha(rel) for rel in {r for r, _, _ in report.valid}}
             if "" not in deps.values():
-                self.cache.put(key, question, answer, deps)
+                self.cache.put(key, question, answer, deps, backend=st.backend, provider=st.provider,
+                               model=st.model, fallback=st.fallback)
         self._log_telemetry(question)
 
         trace: list[str] = [f"modo={self.mode}"]
-        for step in self.agent.memory.steps:
-            for tc in getattr(step, "tool_calls", None) or []:
-                if tc.name == "final_answer":
-                    continue
-                args = (
-                    ", ".join(f"{k}={v!r}"[:60] for k, v in (tc.arguments or {}).items())
-                    if isinstance(tc.arguments, dict)
-                    else str(tc.arguments)[:80]
-                )
-                trace.append(f"{tc.name}({args})")
+        if self._response_fallback:
+            trace.append(f"fallback=api:{self._response_provider}")
+        trace.extend(cli_trace)
+        if api_agent is not None:
+            for step in api_agent.memory.steps:
+                for tc in getattr(step, "tool_calls", None) or []:
+                    if tc.name == "final_answer":
+                        continue
+                    args = (
+                        ", ".join(f"{k}={v!r}"[:60] for k, v in (tc.arguments or {}).items())
+                        if isinstance(tc.arguments, dict)
+                        else str(tc.arguments)[:80]
+                    )
+                    trace.append(f"{tc.name}({args})")
         return answer, trace
 
 
@@ -907,7 +1107,32 @@ def create_agent(
     **model_kw: Any,
 ) -> RepoAgent:
     cfg = cfg or Config()
+    provider_info = cfg.providers.get(provider, {})
+    fallback_aliases = list(fallbacks if fallbacks is not None else cfg.fallback_providers)
+    unknown_fallbacks = [a for a in fallback_aliases if a not in cfg.providers and a.lower() not in ("gemini", "groq")]
+    if unknown_fallbacks:
+        raise ValueError(f"Provider di fallback sconosciuti: {', '.join(unknown_fallbacks)}")
+    invalid_fallbacks = [a for a in fallback_aliases if cfg.providers.get(a, {}).get("type") == "cli"]
+    if invalid_fallbacks:
+        raise ValueError(f"Il fallback deve usare alias API, non CLI: {', '.join(invalid_fallbacks)}")
+    if provider_info.get("type") == "cli":
+        if detect_environment() != "local":
+            raise RuntimeError("Le CLI LLM locali richiedono un terminale locale con binario e login disponibili; Kaggle/Colab non sono supportati.")
+        from cli_backend import CliBackend
+        cli_backend = CliBackend(provider, provider_info, model_id=model_id,
+                                 timeout=cfg.cli_timeout, max_turns=cfg.max_steps)
+        fallback_model = None
+        fallback_provider = ""
+        if fallback_aliases:
+            fallback_provider = fallback_aliases[0]
+            fallback_model = build_model(fallback_provider, cfg=cfg,
+                                         fallbacks=fallback_aliases[1:], **model_kw)
+        root = clone_repo(source, cfg)
+        index = RepoIndex.build(root, cfg, embedder=embedder, force_full=rebuild)
+        return RepoAgent(index, cfg=cfg, cli_backend=cli_backend, provider=provider,
+                         fallback_model=fallback_model, fallback_provider=fallback_provider)
+
     root = clone_repo(source, cfg)
     index = RepoIndex.build(root, cfg, embedder=embedder, force_full=rebuild)
     model = build_model(provider, model_id, cfg=cfg, fallbacks=fallbacks, **model_kw)
-    return RepoAgent(index, model, cfg)
+    return RepoAgent(index, model, cfg, provider=provider)

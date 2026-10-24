@@ -93,7 +93,7 @@ def main() -> None:
     ap.add_argument(
         "--fallback",
         default="",
-        help="Provider di riserva separati da virgola (alias di providers.json), usati se il principale va in rate limit. Es. groq_120b,gemini_3.6",
+        help="Provider API di riserva separati da virgola: rate limit API o errore CLI. Es. groq_120b,gemini_3.6",
     )
     ap.add_argument("--model", default=None, help="ID del modello specifico (opzionale)")
     ap.add_argument(
@@ -113,6 +113,9 @@ def main() -> None:
     unknown = [a for a in fallbacks if a not in available_choices]
     if unknown:
         ap.error(f"--fallback: provider sconosciuti: {', '.join(unknown)}")
+    cli_fallbacks = [a for a in fallbacks if providers_dict.get(a, {}).get("type") == "cli"]
+    if cli_fallbacks:
+        ap.error(f"--fallback accetta solo provider API: {', '.join(cli_fallbacks)}")
 
     cfg = Config(
         embedder_type=args.embedder, allow_exec=args.allow_exec, allow_web=args.allow_web,
@@ -121,14 +124,17 @@ def main() -> None:
     )
     if args.obs_budget is not None:
         cfg.obs_budget_chars = args.obs_budget
-    agent = create_agent(
-        args.source,
-        provider=args.provider,
-        model_id=args.model,
-        rebuild=args.rebuild,
-        cfg=cfg,
-        fallbacks=fallbacks or None,
-    )
+    try:
+        agent = create_agent(
+            args.source,
+            provider=args.provider,
+            model_id=args.model,
+            rebuild=args.rebuild,
+            cfg=cfg,
+            fallbacks=fallbacks or None,
+        )
+    except (ValueError, RuntimeError, FileNotFoundError) as exc:
+        ap.error(str(exc))
 
     print(HELP_BANNER)
     print(f"Repo attiva: {agent.index.repo_root.name} ({agent.index.stats()})\n")
@@ -154,8 +160,7 @@ def main() -> None:
         print("\n" + answer)
         if trace:
             print("\nStrumenti usati: " + " → ".join(trace))
-        if agent.last.cache_hit:
-            print(agent.last.line())
+        print(agent.last.line())
         if agent.last.bad_citations:
             print("⚠️ Citazioni da ricontrollare: " + "; ".join(agent.last.bad_citations[:5]))
 
