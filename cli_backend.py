@@ -14,6 +14,15 @@ from pathlib import Path
 from typing import Any
 
 
+CLI_PROVIDER_ALIASES = {
+    "claude": "claude_cli",
+    "codex": "codex_cli",
+    "vibe": "mistral_vibe_cli",
+    "agy": "antigravity_cli",
+}
+CLI_PROVIDER_PROFILES = {alias: profile for profile, alias in CLI_PROVIDER_ALIASES.items()}
+
+
 @dataclass
 class CliResult:
     text: str = ""
@@ -148,6 +157,7 @@ class CliBackend:
     def __init__(self, provider: str, profile: dict[str, Any], model_id: str | None = None,
                  timeout: int = 300, max_turns: int = 10) -> None:
         self.provider = provider
+        self._cli_provider = CLI_PROVIDER_ALIASES.get(provider, provider)
         self.profile = profile
         self.command = str(profile["command"])
         self.model_id = model_id
@@ -165,7 +175,7 @@ class CliBackend:
 
     def _config(self, root: Path, url: str, token: str, tools: list[str]) -> list[str]:
         command = [self.executable or self.command]
-        if self.provider == "claude_cli":
+        if self._cli_provider == "claude_cli":
             config = root / "claude-mcp.json"
             servers = ({"codemaster": {"type": "http", "url": url,
                         "headers": {"Authorization": f"Bearer {token}"}}} if url else {})
@@ -176,7 +186,7 @@ class CliBackend:
                 command += ["--model", self.model_id]
             if tools:
                 command += ["--allowedTools", *[f"mcp__codemaster__{name}" for name in tools]]
-        elif self.provider == "codex_cli":
+        elif self._cli_provider == "codex_cli":
             command += ["exec", "--json", "--sandbox", "read-only",
                         "--cd", str(root), "--ignore-user-config",
                         "--disable", "shell_tool", "--disable", "unified_exec",
@@ -187,7 +197,7 @@ class CliBackend:
             if self.model_id:
                 command += ["--model", self.model_id]
             command.append("-")
-        elif self.provider == "mistral_vibe_cli":
+        elif self._cli_provider == "mistral_vibe_cli":
             allowed = [f"codemaster_{name}" for name in tools]
             sections = ['default_agent = "auto-approve"', "enable_update_checks = false"]
             if allowed:
@@ -206,7 +216,7 @@ class CliBackend:
             if self.model_id:
                 command += ["--model", self.model_id]
             command += [arg for name in allowed for arg in ("--enabled-tools", name)]
-        elif self.provider == "antigravity_cli":
+        elif self._cli_provider == "antigravity_cli":
             agents = root / ".agents"
             agents.mkdir(exist_ok=True)
             plugins_dir = agents / "plugins" / "codemaster"
@@ -250,8 +260,8 @@ class CliBackend:
             env = sanitized_environment()
             if token:
                 env["CODEMASTER_MCP_TOKEN"] = token
-            prompt = task if self.provider == "claude_cli" else f"ISTRUZIONI DI SISTEMA:\n{system}\n\nTASK:\n{task}"
-            if self.provider == "claude_cli":
+            prompt = task if self._cli_provider == "claude_cli" else f"ISTRUZIONI DI SISTEMA:\n{system}\n\nTASK:\n{task}"
+            if self._cli_provider == "claude_cli":
                 try:
                     at = command.index("--max-turns")
                     command[at:at] = ["--append-system-prompt", system]
@@ -287,7 +297,7 @@ class CliBackend:
             except (OSError, ValueError) as exc:
                 return CliResult(error=f"Impossibile avviare {self.command}: {exc}")
 
-            text, input_tokens, output_tokens, turns = parse_cli_output(self.provider, stdout or "")
+            text, input_tokens, output_tokens, turns = parse_cli_output(self._cli_provider, stdout or "")
             raw_values = _json_values(re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", stdout or "").strip())
             has_json_error = any(
                 isinstance(v, dict) and (v.get("is_error") is True or v.get("type") in ("error", "item.error"))

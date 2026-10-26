@@ -6,6 +6,7 @@ import os
 import re
 
 from agent import create_agent
+from cli_backend import CLI_PROVIDER_ALIASES, CLI_PROVIDER_PROFILES
 from config import Config, load_providers_config
 from prompts import MODE_COMMANDS, MODES
 
@@ -81,13 +82,17 @@ def main() -> None:
 
     providers_dict = load_providers_config()
     available_choices = list(providers_dict.keys()) + ["gemini", "groq"]
+    documented_cli_aliases = [
+        alias for profile, alias in CLI_PROVIDER_ALIASES.items()
+        if providers_dict.get(profile, {}).get("type") == "cli"
+    ]
 
     ap = argparse.ArgumentParser(description="Repo Study Agent - CLI Interattiva per IDE")
     ap.add_argument("source", help="URL Git oppure percorso di una cartella locale")
     ap.add_argument(
         "--provider",
         default="gemini_3.8" if "gemini_3.8" in providers_dict else "gemini",
-        choices=available_choices,
+        choices=available_choices + documented_cli_aliases,
         help="Provider o alias definito in providers.json (es. gemini_3.8, groq_120b, cloudfare_glm-5.3)",
     )
     ap.add_argument(
@@ -109,6 +114,7 @@ def main() -> None:
     ap.add_argument("--no-fast-path", action="store_true", help="Disabilita il fast-path RAG a step singolo")
     ap.add_argument("--obs-budget", type=int, default=None, help="Caratteri di output dei tool tenuti in memoria prima di ridurre i più vecchi (0 = mai)")
     args = ap.parse_args()
+    provider = CLI_PROVIDER_PROFILES.get(args.provider, args.provider)
     fallbacks = [a.strip() for a in args.fallback.split(",") if a.strip()]
     unknown = [a for a in fallbacks if a not in available_choices]
     if unknown:
@@ -127,7 +133,7 @@ def main() -> None:
     try:
         agent = create_agent(
             args.source,
-            provider=args.provider,
+            provider=provider,
             model_id=args.model,
             rebuild=args.rebuild,
             cfg=cfg,
