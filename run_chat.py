@@ -47,7 +47,7 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=7860, help="Porta locale per il server Gradio")
     args = ap.parse_args()
     provider = CLI_PROVIDER_PROFILES.get(args.provider, args.provider)
-    fallbacks = [a.strip() for a in args.fallback.split(",") if a.strip()]
+    fallbacks = [CLI_PROVIDER_PROFILES.get(a.strip(), a.strip()) for a in args.fallback.split(",") if a.strip()]
     unknown = [a for a in fallbacks if a not in available_choices]
     if unknown:
         ap.error(f"--fallback: provider sconosciuti: {', '.join(unknown)}")

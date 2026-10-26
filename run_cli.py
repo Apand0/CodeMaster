@@ -115,7 +115,7 @@ def main() -> None:
     ap.add_argument("--obs-budget", type=int, default=None, help="Caratteri di output dei tool tenuti in memoria prima di ridurre i più vecchi (0 = mai)")
     args = ap.parse_args()
     provider = CLI_PROVIDER_PROFILES.get(args.provider, args.provider)
-    fallbacks = [a.strip() for a in args.fallback.split(",") if a.strip()]
+    fallbacks = [CLI_PROVIDER_PROFILES.get(a.strip(), a.strip()) for a in args.fallback.split(",") if a.strip()]
     unknown = [a for a in fallbacks if a not in available_choices]
     if unknown:
         ap.error(f"--fallback: provider sconosciuti: {', '.join(unknown)}")

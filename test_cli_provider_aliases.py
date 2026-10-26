@@ -80,6 +80,28 @@ class CliProviderAliasTests(unittest.TestCase):
                     run_chat.main()
                     self.assertEqual(create_agent.call_args.kwargs["provider"], configured_name)
 
+    def test_fallback_api_providers_work_with_cli_provider(self) -> None:
+        import run_cli
+
+        agent = SimpleNamespace(index=SimpleNamespace(
+            repo_root=SimpleNamespace(name="repo"), stats=lambda: "stats",
+        ))
+        api_providers = {
+            "gemini_3.8": {"model_id": "gemini-3.8-flash", "env_key": "GEMINI_API_KEY"},
+            "groq_120b": {"model_id": "openai/gpt-oss-120b", "env_key": "GROQ_API_KEY"},
+        }
+        all_providers = {**PROVIDERS, **api_providers}
+        with patch("run_cli.load_providers_config", return_value=all_providers), \
+             patch("run_cli.Config", return_value=SimpleNamespace()), \
+             patch("run_cli.create_agent", return_value=agent) as create_agent, \
+             patch("run_cli.os.system"), \
+             patch("builtins.input", side_effect=EOFError):
+            for alias, configured_name in ALIASES.items():
+                with self.subTest(alias=alias), patch("sys.argv", ["run_cli.py", "repo", "--provider", alias, "--fallback", "gemini_3.8"]):
+                    run_cli.main()
+                    self.assertEqual(create_agent.call_args.kwargs["provider"], configured_name)
+                    self.assertEqual(create_agent.call_args.kwargs["fallbacks"], ["gemini_3.8"])
+
 
 if __name__ == "__main__":
     unittest.main()
