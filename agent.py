@@ -747,6 +747,10 @@ class RepoAgent:
         Fallback trasparente (ritorna None) se la query è complessa o le citazioni falliscono (R1)."""
         if not getattr(self.cfg, "fast_path_enabled", True):
             return None
+        # Con una CLI autenticata il fast-path non fa risparmiare token API e il tetto di 30s
+        # di complete() fa scattare timeout: si va sempre su agentic() con gli strumenti MCP.
+        if self.cli_backend is not None:
+            return None
         if self.mode in ("bugs", "design"):
             return None
         if self._COMPLEX_QUERY_RE.search(question):

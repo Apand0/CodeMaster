@@ -323,7 +323,7 @@ class CliBackend:
                              out_tokens=output_tokens, turns=turns)
 
     def complete(self, system: str, task: str, timeout: int | None = None) -> CliResult:
-        eff_timeout = timeout if timeout is not None else min(30, self.timeout)
+        eff_timeout = timeout if timeout is not None else self.timeout
         return self._run(system, task, timeout=eff_timeout)
 
     def agentic(self, system: str, task: str, url: str, token: str, tools: list[str],
