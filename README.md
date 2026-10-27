@@ -71,7 +71,7 @@ python run_cli.py https://github.com/utente/repo.git
 
 ### CLI LLM autenticati localmente
 
-`--provider` accetta anche `claude_cli`, `codex_cli`, `mistral_vibe_cli` e `antigravity_cli`. Installa la CLI del provider e completa il login nel terminale prima di avviare CodeMaster:
+`--provider` accetta i nomi configurati `claude`, `codex`, `vibe`, `agy` e anche gli alias `claude_cli`, `codex_cli`, `mistral_vibe_cli`, `antigravity_cli`. Installa la CLI del provider e completa il login nel terminale prima di avviare CodeMaster:
 
 | Alias | Eseguibile | Installazione e login |
 |---|---|---|

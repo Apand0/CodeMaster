@@ -5,19 +5,24 @@ import argparse
 
 from agent import create_agent
 from app import launch_chat
+from cli_backend import CLI_PROVIDER_ALIASES, CLI_PROVIDER_PROFILES
 from config import Config, load_providers_config
 
 
 def main() -> None:
     providers_dict = load_providers_config()
     available_choices = list(providers_dict.keys()) + ["gemini", "groq"]
+    documented_cli_aliases = [
+        alias for profile, alias in CLI_PROVIDER_ALIASES.items()
+        if providers_dict.get(profile, {}).get("type") == "cli"
+    ]
 
     ap = argparse.ArgumentParser(description="Avvia la chat web Gradio per studiare una repository")
     ap.add_argument("source", help="URL Git oppure percorso di una cartella locale")
     ap.add_argument(
         "--provider",
         default="gemini_3.8" if "gemini_3.8" in providers_dict else "gemini",
-        choices=available_choices,
+        choices=available_choices + documented_cli_aliases,
         help="Provider o alias da utilizzare (es. da providers.json)",
     )
     ap.add_argument(
@@ -41,14 +46,15 @@ def main() -> None:
     ap.add_argument("--share", action="store_true", help="Genera un link pubblico temporaneo Gradio")
     ap.add_argument("--port", type=int, default=7860, help="Porta locale per il server Gradio")
     args = ap.parse_args()
-    fallbacks = [a.strip() for a in args.fallback.split(",") if a.strip()]
+    provider = CLI_PROVIDER_PROFILES.get(args.provider, args.provider)
+    fallbacks = [CLI_PROVIDER_PROFILES.get(a.strip(), a.strip()) for a in args.fallback.split(",") if a.strip()]
     unknown = [a for a in fallbacks if a not in available_choices]
     if unknown:
         ap.error(f"--fallback: provider sconosciuti: {', '.join(unknown)}")
     cli_fallbacks = [a for a in fallbacks if providers_dict.get(a, {}).get("type") == "cli"]
     if cli_fallbacks:
         ap.error(f"--fallback accetta solo provider API: {', '.join(cli_fallbacks)}")
-    if args.share and providers_dict.get(args.provider, {}).get("type") == "cli":
+    if args.share and providers_dict.get(provider, {}).get("type") == "cli":
         ap.error("--share non è disponibile con provider CLI autenticati localmente.")
 
     cfg = Config(
@@ -61,7 +67,7 @@ def main() -> None:
     try:
         agent = create_agent(
             args.source,
-            provider=args.provider,
+            provider=provider,
             model_id=args.model,
             rebuild=args.rebuild,
             cfg=cfg,
